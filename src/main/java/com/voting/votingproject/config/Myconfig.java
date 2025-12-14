@@ -34,7 +34,7 @@ public class Myconfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(List.of(System.getProperty("FRONTEND_URL"))); // Allow frontend
+        configuration.setAllowedOrigins(List.of(System.getenv("FRONTEND_URL"))); // Allow frontend
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
         configuration.setAllowCredentials(true); // Required for OAuth
