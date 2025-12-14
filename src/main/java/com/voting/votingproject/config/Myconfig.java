@@ -19,7 +19,7 @@ public class Myconfig {
     public WebMvcConfigurer corsConfigurer() {
         return new WebMvcConfigurer() {
 
-            String frontendUrl = System.getProperty("FRONTEND_URL");
+            String frontendUrl = System.getenv("FRONTEND_URL");
             @Override
             public void addCorsMappings(CorsRegistry registry) {
                 registry.addMapping("/**")  // Applies to all endpoints
