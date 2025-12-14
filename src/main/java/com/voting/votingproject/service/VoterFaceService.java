@@ -70,7 +70,7 @@ private SequenceGeneratorService sequenceGeneratorService;
 
         RestTemplate restTemplate = new RestTemplate();
         String flaskEndpoint =
-                System.getProperty("PYTHON_BACKEND_URL") + "/api/register_face";
+                System.getenv("PYTHON_BACKEND_URL") + "/api/register_face";
 
         ResponseEntity<Map> flaskResponse = restTemplate.exchange(
                 flaskEndpoint,
