@@ -12,6 +12,8 @@ import org.springframework.web.client.RestTemplate;
 import com.voting.votingproject.model.Voter;
 import com.voting.votingproject.model.VoterFaceData;
 import com.voting.votingproject.repository.VoterFaceDataRepository;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
+
 import com.voting.votingproject.repository.VoterRepository;
 
 import tools.jackson.core.type.TypeReference;
@@ -35,29 +37,38 @@ public class VoterFaceService {
 private SequenceGeneratorService sequenceGeneratorService;
 
     
-    public Map<String, Object> registerFace(Map<String, Object> faceDataMap) {
+  public Map<String, Object> registerFace(Map<String, Object> faceDataMap) {
 
     Map<String, Object> response = new HashMap<>();
 
     try {
-        // 1️⃣ Extract input
+        /* =====================
+           1️⃣ Validate input
+           ===================== */
         String epicNo = String.valueOf(faceDataMap.get("epicNo"));
-        List<String> base64Images = (List<String>) faceDataMap.get("face_data");
+        List<String> base64Images =
+                (List<String>) faceDataMap.get("face_data");
 
-        if (epicNo == null || epicNo.trim().isEmpty()
-                || base64Images == null || base64Images.isEmpty()) {
-            throw new IllegalArgumentException("Missing epicNo or face_data");
+        if (epicNo == null || epicNo.isBlank()) {
+            throw new IllegalArgumentException("EPIC number is required");
         }
 
-        // 2️⃣ Check voter exists
+        if (base64Images == null || base64Images.isEmpty()) {
+            throw new IllegalArgumentException("Face images are required");
+        }
+
+        /* =====================
+           2️⃣ Check voter
+           ===================== */
         Voter voter = voterRepository.findByEpicNo(epicNo);
         if (voter == null) {
             throw new IllegalArgumentException(
-                "Voter not found with EPIC No: " + epicNo
-            );
+                    "Voter not found for EPIC No: " + epicNo);
         }
 
-        // 3️⃣ Prepare Flask request
+        /* =====================
+           3️⃣ Prepare Flask request
+           ===================== */
         Map<String, Object> requestPayload = new HashMap<>();
         requestPayload.put("user_id", epicNo);
         requestPayload.put("face_data", base64Images);
@@ -68,60 +79,101 @@ private SequenceGeneratorService sequenceGeneratorService;
         HttpEntity<Map<String, Object>> requestEntity =
                 new HttpEntity<>(requestPayload, headers);
 
-        RestTemplate restTemplate = new RestTemplate();
-        String flaskEndpoint =
-                System.getenv("PYTHON_BACKEND_URL") + "/api/register_face";
+        /* =====================
+           4️⃣ RestTemplate with timeout
+           ===================== */
+        SimpleClientHttpRequestFactory factory =
+                new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(15_000);
+        factory.setReadTimeout(90_000);
 
-        ResponseEntity<Map> flaskResponse = restTemplate.exchange(
-                flaskEndpoint,
-                HttpMethod.POST,
-                requestEntity,
-                Map.class
-        );
+        RestTemplate restTemplate = new RestTemplate(factory);
 
-        // 4️⃣ Validate Flask response
+        String baseUrl = System.getenv("PYTHON_BACKEND_URL");
+        if (baseUrl == null || baseUrl.isBlank()) {
+            throw new IllegalStateException(
+                    "Python backend URL is not configured");
+        }
+
+        String flaskEndpoint = baseUrl + "/api/register_face";
+
+        /* =====================
+           5️⃣ Call Flask (with retry for cold start)
+           ===================== */
+        ResponseEntity<Map> flaskResponse;
+
+        try {
+            flaskResponse = restTemplate.exchange(
+                    flaskEndpoint,
+                    HttpMethod.POST,
+                    requestEntity,
+                    Map.class
+            );
+        } catch (Exception firstFail) {
+            // 🔁 retry once (Render cold start)
+            Thread.sleep(2000);
+            flaskResponse = restTemplate.exchange(
+                    flaskEndpoint,
+                    HttpMethod.POST,
+                    requestEntity,
+                    Map.class
+            );
+        }
+
+        /* =====================
+           6️⃣ Validate Flask response
+           ===================== */
         if (flaskResponse.getStatusCode() != HttpStatus.OK ||
-            flaskResponse.getBody() == null ||
-            !"success".equals(flaskResponse.getBody().get("status"))) {
+            flaskResponse.getBody() == null) {
 
             throw new RuntimeException(
-                "Error from Python service: " +
-                (flaskResponse.getBody() != null
-                    ? flaskResponse.getBody().get("message")
-                    : "Unknown error")
-            );
+                    "Python service unavailable (502 / timeout)");
         }
 
-        // 5️⃣ Safely convert embeddings (OBJECT, not String)
+        if (!"success".equals(flaskResponse.getBody().get("status"))) {
+            throw new RuntimeException(
+                    String.valueOf(
+                        flaskResponse.getBody().get("message")));
+        }
+
+        /* =====================
+           7️⃣ Convert embeddings safely
+           ===================== */
         ObjectMapper mapper = new ObjectMapper();
 
-        List<List<Double>> processedEmbeddings =
-            mapper.convertValue(
-                flaskResponse.getBody().get("embeddings"),
-                new TypeReference<List<List<Double>>>() {}
-            );
+        List<List<Double>> embeddings =
+                mapper.convertValue(
+                        flaskResponse.getBody().get("embeddings"),
+                        new TypeReference<List<List<Double>>>() {}
+                );
 
-        if (processedEmbeddings == null || processedEmbeddings.isEmpty()) {
-            throw new IllegalStateException("No face embeddings received");
+        if (embeddings == null || embeddings.isEmpty()) {
+            throw new IllegalStateException(
+                    "No face embeddings received from Python");
         }
 
-        // 6️⃣ Generate LONG id (MANDATORY for your schema)
+        /* =====================
+           8️⃣ Save face data
+           ===================== */
         long faceId =
-    sequenceGeneratorService.getNextSequence("voter_face_data_seq");
+                sequenceGeneratorService.getNextSequence(
+                        "voter_face_data_seq");
 
-Map<String, Object> faceDataObject = new HashMap<>();
-faceDataObject.put("embeddings", processedEmbeddings);
+        Map<String, Object> faceDataObject = new HashMap<>();
+        faceDataObject.put("embeddings", embeddings);
 
-VoterFaceData faceData = new VoterFaceData();
-faceData.setId(faceId);
-faceData.setEpicNo(epicNo);
-faceData.setFaceData(faceDataObject);
+        VoterFaceData faceData = new VoterFaceData();
+        faceData.setId(faceId);
+        faceData.setEpicNo(epicNo);
+        faceData.setFaceData(faceDataObject);
 
-voterFaceDataRepository.save(faceData);
+        voterFaceDataRepository.save(faceData);
 
-
-        // 8️⃣ Success response
+        /* =====================
+           9️⃣ Success response
+           ===================== */
         response.put("status", "success");
+        response.put("code", "FACE_REGISTERED");
         response.put("message", "Face data saved successfully");
         response.put("epicNo", epicNo);
         response.put("faceId", faceId);
@@ -130,15 +182,27 @@ voterFaceDataRepository.save(faceData);
 
     } catch (IllegalArgumentException e) {
         response.put("status", "error");
+        response.put("code", "VALIDATION_ERROR");
+        response.put("message", e.getMessage());
+        return response;
+
+    } catch (IllegalStateException e) {
+        response.put("status", "error");
+        response.put("code", "CONFIG_ERROR");
         response.put("message", e.getMessage());
         return response;
 
     } catch (Exception e) {
-        e.printStackTrace(); // 🔥 keep for debugging
+        e.printStackTrace();
         response.put("status", "error");
-        response.put("message", e.getMessage());
+        response.put("code", "PYTHON_SERVICE_ERROR");
+        response.put(
+                "message",
+                "Face processing service is currently unavailable. Please try again."
+        );
         return response;
     }
 }
+
 
 }
